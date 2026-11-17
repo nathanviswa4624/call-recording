@@ -1,0 +1,27 @@
+[Unit]
+Description=Echelons Call Recording — web UI (Next.js)
+After=network-online.target echelons-backend.service
+
+[Service]
+Type=simple
+User=echelons
+Group=echelons
+WorkingDirectory=/opt/echelons/current/apps/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node .next/standalone/apps/web/server.js
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

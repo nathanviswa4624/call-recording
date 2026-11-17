@@ -1,0 +1,1180 @@
+// Echelons Call Recording Platform — application schema ("app").
+// Asterisk realtime/CDR tables live in schema "asterisk" and are created by
+// deploy/asterisk/sql/asterisk_realtime.sql (Asterisk owns that contract).
+// See docs/02-database-erd.md.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearchPostgres"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+  LOCKED
+}
+
+enum SipProtocol {
+  udp
+  tcp
+  tls
+  ws
+  wss
+}
+
+enum TrunkAuthMode {
+  NONE
+  IP
+  USERPASS
+}
+
+enum SipMode {
+  PEER
+  REGISTER_OUTBOUND
+  ACCEPT_REGISTRATION
+}
+
+enum ObjectOrigin {
+  CREATED
+  IMPORTED
+  TRUNK_GENERATED
+}
+
+enum ConnectivityStatus {
+  UNKNOWN
+  REACHABLE
+  UNREACHABLE
+  LAGGED
+  DISABLED
+}
+
+enum RouteDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+  TRANSIT
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+  TRANSIT
+  UNKNOWN
+}
+
+enum EgressKind {
+  TRUNK
+  CONTEXT
+  HANGUP
+}
+
+enum RecordingMode {
+  NEVER
+  ALWAYS
+  INBOUND_ONLY
+  OUTBOUND_ONLY
+  ON_DEMAND
+}
+
+enum RecordingLayout {
+  MIXED
+  MIXED_AND_SPLIT
+}
+
+enum RecordingFormat {
+  wav
+  wav49
+  gsm
+}
+
+enum AnswerStatus {
+  ANSWERED
+  NO_ANSWER
+  BUSY
+  FAILED
+  CONGESTION
+  ABANDONED
+}
+
+enum RecordingState {
+  RECORDING
+  CLOSED
+  PROCESSING
+  AVAILABLE
+  ARCHIVED
+  MISSING_FILE
+  DELETED
+}
+
+enum StorageKind {
+  LOCAL
+  NFS
+  NAS
+  S3
+}
+
+enum ConfigVersionStatus {
+  DRAFT
+  APPLYING
+  APPLIED
+  FAILED
+  ROLLED_BACK
+}
+
+enum AuditResult {
+  SUCCESS
+  FAILURE
+}
+
+// ───────────────────────────── Tenancy & identity ─────────────────────────────
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sites      Site[]
+  users      User[]
+  roles      Role[]
+  pbxs       Pbx[]
+  servers    AsteriskServer[]
+  calls      Call[]
+  recordings Recording[]
+
+  @@map("organizations")
+}
+
+model Site {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  code           String
+  timezone       String   @default("UTC")
+  address        String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  servers      AsteriskServer[]
+  pbxs         Pbx[]
+  userAccess   UserSiteAccess[]
+
+  @@unique([organizationId, code])
+  @@map("sites")
+}
+
+model User {
+  id                String     @id @default(uuid()) @db.Uuid
+  organizationId    String     @map("organization_id") @db.Uuid
+  email             String
+  username          String
+  displayName       String     @map("display_name")
+  passwordHash      String     @map("password_hash")
+  status            UserStatus @default(ACTIVE)
+  failedLogins      Int        @default(0) @map("failed_logins")
+  lockedUntil       DateTime?  @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt       DateTime?  @map("last_login_at") @db.Timestamptz(3)
+  lastLoginIp       String?    @map("last_login_ip")
+  mfaEnabled        Boolean    @default(false) @map("mfa_enabled")
+  /// Agent mapping: extensions this user owns (for "own recordings" filtering).
+  extensions        String[]   @default([])
+  department        String?
+  permissionVersion Int        @default(1) @map("permission_version")
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization  Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  roles         UserRole[]
+  siteAccess    UserSiteAccess[]
+  refreshTokens RefreshToken[]
+  mfaFactors    MfaFactor[]
+  accessGrants  RecordingAccessGrant[] @relation("GrantUser")
+  auditLogs     AuditLog[]
+  configChanges ConfigurationVersion[]
+
+  @@unique([organizationId, email])
+  @@unique([organizationId, username])
+  @@map("users")
+}
+
+model Role {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String?  @map("organization_id") @db.Uuid
+  code           String
+  name           String
+  description    String?
+  builtin        Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  permissions  RolePermission[]
+  users        UserRole[]
+
+  @@unique([organizationId, code])
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Uuid
+  code        String           @unique
+  description String?
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+/// When a user has no rows here they can access all sites of their organization.
+model UserSiteAccess {
+  userId String @map("user_id") @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@id([userId, siteId])
+  @@map("user_site_access")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  familyId   String    @map("family_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  replacedBy String?   @map("replaced_by") @db.Uuid
+  ip         String?
+  userAgent  String?   @map("user_agent")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model MfaFactor {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  type       String // totp | webauthn
+  secretEnc  String    @map("secret_enc")
+  verifiedAt DateTime? @map("verified_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("mfa_factors")
+}
+
+// ───────────────────────────── Telephony infrastructure ─────────────────────────────
+
+model AsteriskServer {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  siteId           String    @map("site_id") @db.Uuid
+  name             String
+  connectorUrl     String    @map("connector_url")
+  connectorTokenEnc String   @map("connector_token_enc")
+  versionString    String?   @map("version_string")
+  versionMajor     Int?      @map("version_major")
+  strictCatalog    Boolean   @default(true) @map("strict_catalog")
+  recordingBasePath String   @default("/var/spool/asterisk/recording") @map("recording_base_path")
+  /// PostgreSQL schema holding this server's Sorcery realtime + CDR tables (one schema per Asterisk server).
+  realtimeSchema   String    @default("asterisk") @map("realtime_schema")
+  restartRequired  Boolean   @default(false) @map("restart_required")
+  lastSeenAt       DateTime? @map("last_seen_at") @db.Timestamptz(3)
+  status           ConnectivityStatus @default(UNKNOWN)
+  /// Watermark into asterisk.cdr.seq for this server's CDR ingestion.
+  cdrWatermark     BigInt    @default(0) @map("cdr_watermark")
+  celWatermark     BigInt    @default(0) @map("cel_watermark")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  site           Site                   @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  pbxs           Pbx[]
+  transports     SipTransport[]
+  endpoints      SipEndpoint[]
+  aors           SipAor[]
+  auths          SipAuth[]
+  identifies     SipIdentify[]
+  registrations  SipRegistration[]
+  domainAliases  SipDomainAlias[]
+  globals        SipGlobal?
+  sorcery        SorceryMapping[]
+  contexts       DialplanContext[]
+  configVersions ConfigurationVersion[]
+  calls          Call[]
+
+  @@unique([organizationId, name])
+  @@map("asterisk_servers")
+}
+
+/// "PBX Connection" — a customer PBX attached to an Asterisk server via one or more SIP trunks.
+model Pbx {
+  id                String             @id @default(uuid()) @db.Uuid
+  organizationId    String             @map("organization_id") @db.Uuid
+  siteId            String             @map("site_id") @db.Uuid
+  serverId          String             @map("server_id") @db.Uuid
+  name              String
+  /// Short slug used in dialplan context names and recording paths (e.g. AVAYA).
+  code              String
+  description       String?
+  vendor            String
+  host              String
+  port              Int                @default(5060)
+  protocol          SipProtocol        @default(udp)
+  sipMode           SipMode            @default(PEER) @map("sip_mode")
+  authMode          TrunkAuthMode      @default(IP) @map("auth_mode")
+  inboundContext    String             @map("inbound_context")
+  outboundContext   String?            @map("outbound_context")
+  recordingPolicyId String?            @map("recording_policy_id") @db.Uuid
+  enabled           Boolean            @default(true)
+  status            ConnectivityStatus @default(UNKNOWN)
+  lastCheckAt       DateTime?          @map("last_check_at") @db.Timestamptz(3)
+  lastCheckResult   Json?              @map("last_check_result")
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  site            Site             @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  server          AsteriskServer   @relation(fields: [serverId], references: [id], onDelete: Restrict)
+  recordingPolicy RecordingPolicy? @relation(fields: [recordingPolicyId], references: [id], onDelete: SetNull)
+  trunks          SipTrunk[]
+  routes          Route[]
+  directory       ExtensionDir[]
+  calls           Call[]           @relation("CallSourcePbx")
+  destCalls       Call[]           @relation("CallDestPbx")
+
+  @@unique([serverId, code])
+  @@index([organizationId, siteId])
+  @@map("pbxs")
+}
+
+model TrunkTemplate {
+  id              String      @id @default(uuid()) @db.Uuid
+  organizationId  String?     @map("organization_id") @db.Uuid
+  code            String
+  vendor          String
+  name            String
+  description     String?
+  defaultProtocol SipProtocol @default(udp) @map("default_protocol")
+  defaultPort     Int         @default(5060) @map("default_port")
+  /// { endpoint: {...}, aor: {...}, identify: {...}, registration: {...} }
+  defaults        Json
+  builtin         Boolean     @default(false)
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  trunks          SipTrunk[]
+
+  @@unique([organizationId, code])
+  @@map("trunk_templates")
+}
+
+model SipTrunk {
+  id                String             @id @default(uuid()) @db.Uuid
+  organizationId    String             @map("organization_id") @db.Uuid
+  pbxId             String             @map("pbx_id") @db.Uuid
+  templateId        String?            @map("template_id") @db.Uuid
+  name              String
+  host              String
+  port              Int                @default(5060)
+  protocol          SipProtocol        @default(udp)
+  transportName     String             @map("transport_name")
+  authMode          TrunkAuthMode      @default(IP) @map("auth_mode")
+  sipMode           SipMode            @default(PEER) @map("sip_mode")
+  username          String?
+  /// AES-256-GCM, never returned by the API.
+  passwordEnc       String?            @map("password_enc")
+  realm             String?
+  remoteDomain      String?            @map("remote_domain")
+  inboundContext    String             @map("inbound_context")
+  outboundContext   String?            @map("outbound_context")
+  matchNetworks     String[]           @default([]) @map("match_networks")
+  qualifyFrequency  Int                @default(60) @map("qualify_frequency")
+  /// Field-level admin overrides kept across regeneration: { endpoint: {...}, aor: {...} }
+  overrides         Json               @default("{}")
+  recordingPolicyId String?            @map("recording_policy_id") @db.Uuid
+  enabled           Boolean            @default(true)
+  status            ConnectivityStatus @default(UNKNOWN)
+  lastRttMs         Int?               @map("last_rtt_ms")
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  pbx             Pbx              @relation(fields: [pbxId], references: [id], onDelete: Cascade)
+  template        TrunkTemplate?   @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  recordingPolicy RecordingPolicy? @relation(fields: [recordingPolicyId], references: [id], onDelete: SetNull)
+  endpoints       SipEndpoint[]
+  routes          Route[]          @relation("RouteEgressTrunk")
+  calls           Call[]
+
+  @@unique([pbxId, name])
+  @@index([organizationId])
+  @@map("sip_trunks")
+}
+
+// ───────────────────────────── PJSIP drafts (published to asterisk.ps_*) ─────────────────────────────
+// Common columns: params (Json map of catalog options), origin, publishedHash, draftHash.
+
+model SipTransport {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  serverId       String       @map("server_id") @db.Uuid
+  name           String
+  protocol       SipProtocol
+  bindAddress    String       @default("0.0.0.0") @map("bind_address")
+  bindPort       Int          @default(5060) @map("bind_port")
+  params         Json         @default("{}")
+  origin         ObjectOrigin @default(CREATED)
+  draftHash      String?      @map("draft_hash")
+  publishedHash  String?      @map("published_hash")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server         AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, name])
+  @@map("sip_transports")
+}
+
+model SipEndpoint {
+  id                String       @id @default(uuid()) @db.Uuid
+  organizationId    String       @map("organization_id") @db.Uuid
+  serverId          String       @map("server_id") @db.Uuid
+  name              String
+  managedByTrunkId  String?      @map("managed_by_trunk_id") @db.Uuid
+  /// Catalog options (transport, context, allow, direct_media, ... and custom ones).
+  params            Json         @default("{}")
+  origin            ObjectOrigin @default(CREATED)
+  enabled           Boolean      @default(true)
+  draftHash         String?      @map("draft_hash")
+  publishedHash     String?      @map("published_hash")
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server            AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  managedByTrunk    SipTrunk?      @relation(fields: [managedByTrunkId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, name])
+  @@map("sip_endpoints")
+}
+
+model SipAor {
+  id               String       @id @default(uuid()) @db.Uuid
+  organizationId   String       @map("organization_id") @db.Uuid
+  serverId         String       @map("server_id") @db.Uuid
+  name             String
+  managedByTrunkId String?      @map("managed_by_trunk_id") @db.Uuid
+  params           Json         @default("{}")
+  origin           ObjectOrigin @default(CREATED)
+  draftHash        String?      @map("draft_hash")
+  publishedHash    String?      @map("published_hash")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server           AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  contacts         SipContact[]
+
+  @@unique([serverId, name])
+  @@map("sip_aors")
+}
+
+/// Static contacts configured for an AOR (dynamic registrations are read live from Asterisk).
+model SipContact {
+  id        String   @id @default(uuid()) @db.Uuid
+  aorId     String   @map("aor_id") @db.Uuid
+  uri       String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  aor       SipAor   @relation(fields: [aorId], references: [id], onDelete: Cascade)
+
+  @@map("sip_contacts")
+}
+
+model SipAuth {
+  id               String       @id @default(uuid()) @db.Uuid
+  organizationId   String       @map("organization_id") @db.Uuid
+  serverId         String       @map("server_id") @db.Uuid
+  name             String
+  managedByTrunkId String?      @map("managed_by_trunk_id") @db.Uuid
+  authType         String       @default("userpass") @map("auth_type")
+  username         String?
+  /// AES-256-GCM encrypted password / md5_cred. Never serialised to clients.
+  secretEnc        String?      @map("secret_enc")
+  realm            String?
+  params           Json         @default("{}")
+  origin           ObjectOrigin @default(CREATED)
+  draftHash        String?      @map("draft_hash")
+  publishedHash    String?      @map("published_hash")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server           AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, name])
+  @@map("sip_auths")
+}
+
+model SipIdentify {
+  id               String       @id @default(uuid()) @db.Uuid
+  organizationId   String       @map("organization_id") @db.Uuid
+  serverId         String       @map("server_id") @db.Uuid
+  name             String
+  managedByTrunkId String?      @map("managed_by_trunk_id") @db.Uuid
+  endpointName     String       @map("endpoint_name")
+  params           Json         @default("{}")
+  origin           ObjectOrigin @default(CREATED)
+  draftHash        String?      @map("draft_hash")
+  publishedHash    String?      @map("published_hash")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server           AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, name])
+  @@map("sip_identifies")
+}
+
+model SipRegistration {
+  id               String       @id @default(uuid()) @db.Uuid
+  organizationId   String       @map("organization_id") @db.Uuid
+  serverId         String       @map("server_id") @db.Uuid
+  name             String
+  managedByTrunkId String?      @map("managed_by_trunk_id") @db.Uuid
+  params           Json         @default("{}")
+  origin           ObjectOrigin @default(CREATED)
+  draftHash        String?      @map("draft_hash")
+  publishedHash    String?      @map("published_hash")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server           AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, name])
+  @@map("sip_registrations")
+}
+
+model SipDomainAlias {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  serverId       String   @map("server_id") @db.Uuid
+  name           String
+  domain         String
+  draftHash      String?  @map("draft_hash")
+  publishedHash  String?  @map("published_hash")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  server         AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, name])
+  @@map("sip_domain_aliases")
+}
+
+model SipGlobal {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  serverId       String   @unique @map("server_id") @db.Uuid
+  params         Json     @default("{}")
+  draftHash      String?  @map("draft_hash")
+  publishedHash  String?  @map("published_hash")
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server         AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@map("sip_globals")
+}
+
+/// Mirror of sorcery.conf wizard mapping per object type, for display + cache settings.
+model SorceryMapping {
+  id          String   @id @default(uuid()) @db.Uuid
+  serverId    String   @map("server_id") @db.Uuid
+  module      String // res_pjsip, res_pjsip_endpoint_identifier_ip, ...
+  objectType  String   @map("object_type") // endpoint, aor, ...
+  wizard      String // realtime | config | memory | memory_cache | astdb
+  wizardData  String   @map("wizard_data") // ps_endpoints | pjsip.conf,criteria=type=endpoint
+  cacheEnabled Boolean @default(false) @map("cache_enabled")
+  cacheOptions String? @map("cache_options")
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  server      AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, module, objectType, wizard])
+  @@map("sorcery_mappings")
+}
+
+// ───────────────────────────── Routing ─────────────────────────────
+
+model RecordingPolicy {
+  id                String          @id @default(uuid()) @db.Uuid
+  organizationId    String          @map("organization_id") @db.Uuid
+  name              String
+  mode              RecordingMode   @default(ALWAYS)
+  layout            RecordingLayout @default(MIXED)
+  format            RecordingFormat @default(wav)
+  postFormats       String[]        @default([]) @map("post_formats")
+  keepOriginal      Boolean         @default(true) @map("keep_original")
+  storageLocationId String?         @map("storage_location_id") @db.Uuid
+  isDefault         Boolean         @default(false) @map("is_default")
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  storageLocation StorageLocation? @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+  pbxs            Pbx[]
+  trunks          SipTrunk[]
+  routes          Route[]
+  patterns        RoutePattern[]
+
+  @@unique([organizationId, name])
+  @@map("recording_policies")
+}
+
+model CallType {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  code           String
+  name           String
+  color          String?
+  builtin        Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  routes Route[]
+  calls  Call[]
+
+  @@unique([organizationId, code])
+  @@map("call_types")
+}
+
+model Route {
+  id                String         @id @default(uuid()) @db.Uuid
+  organizationId    String         @map("organization_id") @db.Uuid
+  /// Human readable route number shown in UI (Route ID).
+  routeNumber       Int            @map("route_number")
+  name              String
+  description       String?
+  pbxId             String         @map("pbx_id") @db.Uuid
+  direction         RouteDirection
+  priority          Int            @default(100)
+  egressKind        EgressKind     @default(TRUNK) @map("egress_kind")
+  egressTrunkId     String?        @map("egress_trunk_id") @db.Uuid
+  egressContext     String?        @map("egress_context")
+  callTypeId        String?        @map("call_type_id") @db.Uuid
+  recordingPolicyId String?        @map("recording_policy_id") @db.Uuid
+  callerIdNumber    String?        @map("caller_id_number")
+  callerIdName      String?        @map("caller_id_name")
+  dialTimeout       Int            @default(60) @map("dial_timeout")
+  dialOptions       String?        @map("dial_options")
+  enabled           Boolean        @default(true)
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  pbx             Pbx              @relation(fields: [pbxId], references: [id], onDelete: Cascade)
+  egressTrunk     SipTrunk?        @relation("RouteEgressTrunk", fields: [egressTrunkId], references: [id], onDelete: Restrict)
+  callType        CallType?        @relation(fields: [callTypeId], references: [id], onDelete: SetNull)
+  recordingPolicy RecordingPolicy? @relation(fields: [recordingPolicyId], references: [id], onDelete: SetNull)
+  patterns        RoutePattern[]
+  calls           Call[]
+
+  @@unique([organizationId, routeNumber])
+  @@index([pbxId, priority])
+  @@map("routes")
+}
+
+model RoutePattern {
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  routeId           String   @map("route_id") @db.Uuid
+  pattern           String
+  prefix            String?
+  stripDigits       Int      @default(0) @map("strip_digits")
+  prepend           String?
+  description       String?
+  recordingPolicyId String?  @map("recording_policy_id") @db.Uuid
+  enabled           Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  route           Route            @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  recordingPolicy RecordingPolicy? @relation(fields: [recordingPolicyId], references: [id], onDelete: SetNull)
+  calls           Call[]
+
+  @@unique([routeId, prefix, pattern])
+  @@index([organizationId, pattern])
+  @@map("route_patterns")
+}
+
+model ClassificationRule {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  priority       Int
+  enabled        Boolean  @default(true)
+  match          String   @default("all")
+  /// [{ field, op, value, header? }]
+  conditions     Json
+  /// { callTypeCode?, routeId?, direction?, tags? }
+  actions        Json
+  stop           Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([organizationId, priority])
+  @@map("classification_rules")
+}
+
+// ───────────────────────────── Dialplan (web editor) ─────────────────────────────
+
+model DialplanContext {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  serverId       String   @map("server_id") @db.Uuid
+  name           String
+  description    String?
+  includes       String[] @default([])
+  /// IMPORTED contexts from existing extensions.conf are read-only references.
+  readOnly       Boolean  @default(false) @map("read_only")
+  origin         ObjectOrigin @default(CREATED)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  server     AsteriskServer      @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  extensions DialplanExtension[]
+
+  @@unique([serverId, name])
+  @@map("dialplan_contexts")
+}
+
+model DialplanExtension {
+  id         String             @id @default(uuid()) @db.Uuid
+  contextId  String             @map("context_id") @db.Uuid
+  exten      String
+  sortOrder  Int                @default(0) @map("sort_order")
+  context    DialplanContext    @relation(fields: [contextId], references: [id], onDelete: Cascade)
+  priorities DialplanPriority[]
+
+  @@unique([contextId, exten])
+  @@map("dialplan_extensions")
+}
+
+model DialplanPriority {
+  id          String            @id @default(uuid()) @db.Uuid
+  extensionId String            @map("extension_id") @db.Uuid
+  position    Int
+  label       String?
+  app         String
+  args        String            @default("")
+  extension   DialplanExtension @relation(fields: [extensionId], references: [id], onDelete: Cascade)
+
+  @@unique([extensionId, position])
+  @@map("dialplan_priorities")
+}
+
+// ───────────────────────────── Calls, CDR, CEL ─────────────────────────────
+
+/// Per-extension directory: maps extensions to agents/departments for reporting.
+model ExtensionDir {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  pbxId          String   @map("pbx_id") @db.Uuid
+  extension      String
+  displayName    String?  @map("display_name")
+  agentUserId    String?  @map("agent_user_id") @db.Uuid
+  department     String?
+  queue          String?
+  pbx            Pbx      @relation(fields: [pbxId], references: [id], onDelete: Cascade)
+
+  @@unique([pbxId, extension])
+  @@map("extensions_dir")
+}
+
+model CdrRecord {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  serverId       String    @map("server_id") @db.Uuid
+  callId         String?   @map("call_id") @db.Uuid
+  sourceSeq      BigInt    @map("source_seq")
+  uniqueid       String
+  linkedid       String
+  calldate       DateTime  @db.Timestamptz(3)
+  answerdate     DateTime? @db.Timestamptz(3)
+  enddate        DateTime? @db.Timestamptz(3)
+  duration       Int
+  billsec        Int
+  disposition    String
+  channel        String?
+  dstchannel     String?
+  src            String?
+  dst            String?
+  clid           String?
+  dcontext       String?
+  lastapp        String?
+  lastdata       String?
+  accountcode    String?
+  amaflags       Int?
+  userfield      String?
+  peeraccount    String?
+  sequence       Int?
+  /// Custom ech_* CDR variables and SIP data.
+  extra          Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  call Call? @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, sourceSeq])
+  @@index([organizationId, calldate(sort: Desc)])
+  @@index([uniqueid])
+  @@index([linkedid])
+  @@map("cdr_records")
+}
+
+model CelRecord {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  serverId       String   @map("server_id") @db.Uuid
+  callId         String?  @map("call_id") @db.Uuid
+  sourceSeq      BigInt   @map("source_seq")
+  eventtype      String
+  eventtime      DateTime @db.Timestamptz(6)
+  uniqueid       String
+  linkedid       String
+  cidNum         String?  @map("cid_num")
+  exten          String?
+  context        String?
+  channame       String?
+  appname        String?
+  appdata        String?
+  peer           String?
+  extra          String?
+
+  call Call? @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, sourceSeq])
+  @@index([linkedid])
+  @@map("cel_records")
+}
+
+/// A normalised call (grouped by Asterisk linkedid).
+model Call {
+  id                 String        @id @default(uuid()) @db.Uuid
+  organizationId     String        @map("organization_id") @db.Uuid
+  siteId             String?       @map("site_id") @db.Uuid
+  serverId           String        @map("server_id") @db.Uuid
+  uniqueid           String
+  linkedid           String
+  sipCallId          String?       @map("sip_call_id")
+  sourcePbxId        String?       @map("source_pbx_id") @db.Uuid
+  destinationPbxId   String?       @map("destination_pbx_id") @db.Uuid
+  trunkId            String?       @map("trunk_id") @db.Uuid
+  routeId            String?       @map("route_id") @db.Uuid
+  routePatternId     String?       @map("route_pattern_id") @db.Uuid
+  callTypeId         String?       @map("call_type_id") @db.Uuid
+  direction          CallDirection @default(UNKNOWN)
+  callerNumber       String?       @map("caller_number")
+  callerName         String?       @map("caller_name")
+  destinationNumber  String?       @map("destination_number")
+  destinationName    String?       @map("destination_name")
+  dialedNumber       String?       @map("dialed_number")
+  extension          String?
+  agentUserId        String?       @map("agent_user_id") @db.Uuid
+  department         String?
+  queue              String?
+  campaign           String?
+  context            String?
+  startTime          DateTime      @map("start_time") @db.Timestamptz(3)
+  answerTime         DateTime?     @map("answer_time") @db.Timestamptz(3)
+  endTime            DateTime?     @map("end_time") @db.Timestamptz(3)
+  duration           Int           @default(0)
+  billsec            Int           @default(0)
+  answerStatus       AnswerStatus  @default(FAILED) @map("answer_status")
+  hangupCause        Int?          @map("hangup_cause")
+  sipResponse        Int?          @map("sip_response")
+  sourceIp           String?       @map("source_ip")
+  destinationIp      String?       @map("destination_ip")
+  userAgent          String?       @map("user_agent")
+  transport          String?
+  tags               String[]      @default([])
+  classifiedBy       String[]      @default([]) @map("classified_by")
+  hasRecording       Boolean       @default(false) @map("has_recording")
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  server         AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Restrict)
+  sourcePbx      Pbx?           @relation("CallSourcePbx", fields: [sourcePbxId], references: [id], onDelete: SetNull)
+  destinationPbx Pbx?           @relation("CallDestPbx", fields: [destinationPbxId], references: [id], onDelete: SetNull)
+  trunk          SipTrunk?      @relation(fields: [trunkId], references: [id], onDelete: SetNull)
+  route          Route?         @relation(fields: [routeId], references: [id], onDelete: SetNull)
+  routePattern   RoutePattern?  @relation(fields: [routePatternId], references: [id], onDelete: SetNull)
+  callType       CallType?      @relation(fields: [callTypeId], references: [id], onDelete: SetNull)
+  cdrs           CdrRecord[]
+  cels           CelRecord[]
+  events         CallEvent[]
+  recordings     Recording[]
+
+  @@unique([serverId, linkedid])
+  @@index([organizationId, startTime(sort: Desc), id])
+  @@index([organizationId, callerNumber, startTime(sort: Desc)])
+  @@index([organizationId, destinationNumber, startTime(sort: Desc)])
+  @@index([organizationId, sourcePbxId, startTime(sort: Desc)])
+  @@index([trunkId, startTime])
+  @@index([routeId, startTime])
+  @@index([routePatternId, startTime])
+  @@index([organizationId, callTypeId, startTime(sort: Desc)])
+  @@index([organizationId, direction, startTime(sort: Desc)])
+  @@index([uniqueid])
+  @@index([agentUserId, startTime(sort: Desc)])
+  @@map("calls")
+}
+
+/// Timeline entries (SIP signalling + CEL milestones) for the call detail page.
+model CallEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  callId    String   @map("call_id") @db.Uuid
+  at        DateTime @db.Timestamptz(6)
+  kind      String // SIP | CEL | RECORDING | ROUTE
+  label     String // INVITE, 180 Ringing, BRIDGE_ENTER, ...
+  data      Json     @default("{}")
+  call      Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId, at])
+  @@map("call_events")
+}
+
+// ───────────────────────────── Recordings & storage ─────────────────────────────
+
+model StorageLocation {
+  id             String      @id @default(uuid()) @db.Uuid
+  organizationId String      @map("organization_id") @db.Uuid
+  name           String
+  kind           StorageKind
+  /// Local/NFS/NAS: absolute base path. S3: bucket[/prefix].
+  basePath       String      @map("base_path")
+  endpoint       String?
+  region         String?
+  accessKeyEnc   String?     @map("access_key_enc")
+  secretKeyEnc   String?     @map("secret_key_enc")
+  forcePathStyle Boolean     @default(true) @map("force_path_style")
+  isDefault      Boolean     @default(false) @map("is_default")
+  enabled        Boolean     @default(true)
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  recordings Recording[]
+  policies   RecordingPolicy[]
+  retention  RetentionPolicy[]
+
+  @@unique([organizationId, name])
+  @@map("storage_locations")
+}
+
+model Recording {
+  id                 String          @id @default(uuid()) @db.Uuid
+  organizationId     String          @map("organization_id") @db.Uuid
+  siteId             String?         @map("site_id") @db.Uuid
+  callId             String?         @map("call_id") @db.Uuid
+  storageLocationId  String          @map("storage_location_id") @db.Uuid
+  /// Relative path without extension, as set in CDR ech_rec_file.
+  baseName           String          @map("base_name")
+  format             String
+  layout             RecordingLayout @default(MIXED)
+  /// Relative file paths: { mixed: "...wav", caller?: "...", callee?: "...", mp3?: "..." }
+  files              Json            @default("{}")
+  sizeBytes          BigInt          @default(0) @map("size_bytes")
+  durationSec        Int?            @map("duration_sec")
+  sha256             String?
+  state              RecordingState  @default(RECORDING)
+  startedAt          DateTime        @map("started_at") @db.Timestamptz(3)
+  endedAt            DateTime?       @map("ended_at") @db.Timestamptz(3)
+  waveform           Json?
+  retentionExpiresAt DateTime?       @map("retention_expires_at") @db.Timestamptz(3)
+  legalHold          Boolean         @default(false) @map("legal_hold")
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  call            Call?                  @relation(fields: [callId], references: [id], onDelete: SetNull)
+  storageLocation StorageLocation        @relation(fields: [storageLocationId], references: [id], onDelete: Restrict)
+  tags            RecordingTag[]
+  notes           RecordingNote[]
+  grants          RecordingAccessGrant[]
+
+  @@unique([storageLocationId, baseName])
+  @@index([organizationId, startedAt(sort: Desc)])
+  @@index([callId])
+  @@index([storageLocationId, retentionExpiresAt])
+  @@index([state])
+  @@map("recordings")
+}
+
+model RecordingTag {
+  recordingId String    @map("recording_id") @db.Uuid
+  tag         String
+  createdBy   String?   @map("created_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  recording   Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+
+  @@id([recordingId, tag])
+  @@index([tag])
+  @@map("recording_tags")
+}
+
+model RecordingNote {
+  id          String    @id @default(uuid()) @db.Uuid
+  recordingId String    @map("recording_id") @db.Uuid
+  authorId    String    @map("author_id") @db.Uuid
+  body        String
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  recording   Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+
+  @@index([recordingId])
+  @@map("recording_notes")
+}
+
+model RecordingAccessGrant {
+  id          String    @id @default(uuid()) @db.Uuid
+  recordingId String    @map("recording_id") @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  grantedBy   String    @map("granted_by") @db.Uuid
+  expiresAt   DateTime? @map("expires_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  recording   Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  user        User      @relation("GrantUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([recordingId, userId])
+  @@map("recording_access_grants")
+}
+
+model RetentionPolicy {
+  id                String           @id @default(uuid()) @db.Uuid
+  organizationId    String           @map("organization_id") @db.Uuid
+  name              String
+  /// null = unlimited
+  keepDays          Int?             @map("keep_days")
+  pbxId             String?          @map("pbx_id") @db.Uuid
+  callTypeId        String?          @map("call_type_id") @db.Uuid
+  routeId           String?          @map("route_id") @db.Uuid
+  department        String?
+  layout            RecordingLayout?
+  storageLocationId String?          @map("storage_location_id") @db.Uuid
+  enabled           Boolean          @default(true)
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  storageLocation   StorageLocation? @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, name])
+  @@map("retention_policies")
+}
+
+model RetentionRun {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  dryRun         Boolean   @map("dry_run")
+  startedBy      String?   @map("started_by") @db.Uuid
+  startedAt      DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(3)
+  examined       Int       @default(0)
+  deleted        Int       @default(0)
+  missing        Int       @default(0)
+  errors         Int       @default(0)
+  bytesFreed     BigInt    @default(0) @map("bytes_freed")
+  report         Json      @default("[]")
+
+  @@map("retention_runs")
+}
+
+// ───────────────────────────── Governance ─────────────────────────────
+
+model AuditLog {
+  id             String      @id @default(uuid()) @db.Uuid
+  organizationId String?     @map("organization_id") @db.Uuid
+  userId         String?     @map("user_id") @db.Uuid
+  ip             String?
+  userAgent      String?     @map("user_agent")
+  action         String
+  objectType     String?     @map("object_type")
+  objectId       String?     @map("object_id")
+  objectLabel    String?     @map("object_label")
+  oldValue       Json?       @map("old_value")
+  newValue       Json?       @map("new_value")
+  result         AuditResult
+  error          String?
+  requestId      String?     @map("request_id")
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  user           User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@index([objectType, objectId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+model ConfigurationVersion {
+  id             String              @id @default(uuid()) @db.Uuid
+  organizationId String              @map("organization_id") @db.Uuid
+  serverId       String              @map("server_id") @db.Uuid
+  version        Int
+  status         ConfigVersionStatus @default(DRAFT)
+  changedById    String?             @map("changed_by_id") @db.Uuid
+  summary        String?
+  /// Full published state: { pjsip: {endpoint:[...], ...}, dialplan: "text", transports: "text" } — secrets redacted.
+  snapshot       Json
+  /// Encrypted blob of secrets needed to restore this version (auth passwords).
+  secretsEnc     String?             @map("secrets_enc")
+  changes        Json                @default("[]")
+  dialplanHash   String?             @map("dialplan_hash")
+  error          String?
+  appliedAt      DateTime?           @map("applied_at") @db.Timestamptz(3)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  server    AsteriskServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  changedBy User?          @relation(fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, version])
+  @@index([serverId, createdAt(sort: Desc)])
+  @@map("configuration_versions")
+}
+
+model Backup {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  serverId       String?  @map("server_id") @db.Uuid
+  createdById    String?  @map("created_by_id") @db.Uuid
+  path           String
+  sizeBytes      BigInt   @map("size_bytes")
+  sha256         String
+  includesSecrets Boolean @default(false) @map("includes_secrets")
+  note           String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@map("backups")
+}
+
+model SystemSetting {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String?  @map("organization_id") @db.Uuid
+  key            String
+  value          Json
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, key])
+  @@map("system_settings")
+}

@@ -1,0 +1,29 @@
+[Unit]
+Description=Echelons Call Recording — background worker (CDR ingest, recordings, retention)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=echelons
+Group=echelons
+SupplementaryGroups=asterisk
+WorkingDirectory=/opt/echelons/current/apps/backend
+EnvironmentFile=/etc/echelons/echelons.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/src/worker.js
+ReadWritePaths=/var/spool/asterisk/recording /var/backups/echelons
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

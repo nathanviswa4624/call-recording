@@ -1,0 +1,25 @@
+; merge into /etc/asterisk/manager.conf — AMI user for the Echelons connector ONLY.
+; Bound to localhost; the connector enforces its own action/CLI allowlists (docs/08 §6).
+[general]
+enabled = yes
+port = 5038
+bindaddr = 127.0.0.1
+
+[echelons]
+secret = CHANGE_ME
+deny = 0.0.0.0/0.0.0.0
+permit = 127.0.0.1/255.255.255.255
+read = system,call,agent,user,config,dtmf,reporting,cdr,dialplan
+write = system,call,originate,reporting,command
+writetimeout = 5000
+; reduce event volume to what the live-call model needs
+eventfilter = Event: Newchannel
+eventfilter = Event: Newstate
+eventfilter = Event: NewCallerid
+eventfilter = Event: Hangup
+eventfilter = Event: VarSet
+eventfilter = Event: MixMonitorStart
+eventfilter = Event: MixMonitorStop
+eventfilter = Event: ContactStatus
+eventfilter = Event: Registry
+eventfilter = Event: FullyBooted

@@ -1,0 +1,29 @@
+[Unit]
+Description=Echelons Asterisk Connector (AMI/ARI/config files)
+After=network-online.target asterisk.service
+Wants=asterisk.service
+
+[Service]
+Type=simple
+User=asterisk
+Group=asterisk
+WorkingDirectory=/opt/echelons/current/apps/connector
+EnvironmentFile=/etc/echelons/connector.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/index.js
+# Only the two managed config files and the recording spool are writable.
+ReadWritePaths=/etc/asterisk /var/spool/asterisk/recording
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

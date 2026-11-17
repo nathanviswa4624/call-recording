@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.next/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/recordings/
+/backups/
+.DS_Store
+*.tsbuildinfo

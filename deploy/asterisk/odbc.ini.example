@@ -1,0 +1,11 @@
+; /etc/odbc.ini — install.sh fills in the generated password.
+[echelons-asterisk]
+Description = Echelons Asterisk realtime + CDR
+Driver      = PostgreSQL Unicode
+Servername  = 127.0.0.1
+Port        = 5432
+Database    = echelons
+Username    = asterisk_rt
+Password    = CHANGE_ME
+; schema "asterisk" first so ps_* / cdr / cel resolve without qualification
+ConnSettings = SET search_path TO asterisk; SET TIME ZONE 'UTC';
